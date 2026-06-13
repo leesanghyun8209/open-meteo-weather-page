@@ -12,11 +12,17 @@ import {
   Search,
   Wind,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { addDays, getDateBounds, todayString, type WeatherMode } from "@/lib/date-rules";
 import { weatherCodeLabel } from "@/lib/weather-codes";
-import type { LocationSearchResult, LocationSource, WeatherHistoryItem, WeatherResult } from "@/lib/weather-types";
+import type {
+  LocationSearchResult,
+  LocationSource,
+  ReverseLocationResult,
+  WeatherHistoryItem,
+  WeatherResult,
+} from "@/lib/weather-types";
 
 const WeatherMap = dynamic(() => import("./WeatherMap"), {
   ssr: false,
@@ -57,6 +63,8 @@ export function WeatherDashboard() {
   const [isLoadingWeather, setIsLoadingWeather] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [isLocating, setIsLocating] = useState(false);
+  const [isResolvingLocation, setIsResolvingLocation] = useState(false);
+  const locationRequestIdRef = useRef(0);
 
   const fetchHistory = useCallback(async () => {
     const response = await fetch("/api/weather/history", { cache: "no-store" });
@@ -115,6 +123,98 @@ export function WeatherDashboard() {
     [date, loadWeather, location, mode],
   );
 
+  const resolveCoordinateLocation = useCallback(async (latitude: number, longitude: number) => {
+    const response = await fetch(
+      `/api/locations/reverse?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`,
+      { cache: "no-store" },
+    );
+    const data = (await response.json()) as { location?: ReverseLocationResult } & ApiError;
+
+    if (!response.ok || !data.location) {
+      throw new Error(data.error?.message ?? "지역명을 확인하지 못했습니다.");
+    }
+
+    return data.location;
+  }, []);
+
+  const applyCoordinateSelection = useCallback(
+    async ({
+      latitude,
+      longitude,
+      source,
+      autoFetch,
+      pendingNotice,
+      resolvedNotice,
+    }: {
+      latitude: number;
+      longitude: number;
+      source: LocationSource;
+      autoFetch?: boolean;
+      pendingNotice: string;
+      resolvedNotice: string;
+    }) => {
+      const requestId = locationRequestIdRef.current + 1;
+      locationRequestIdRef.current = requestId;
+
+      const pendingLocation: SelectedLocation = {
+        latitude,
+        longitude,
+        displayName: "지역명을 확인하는 중...",
+        source,
+      };
+
+      setLocation(pendingLocation);
+      setNotice(pendingNotice);
+      setError(null);
+      setIsResolvingLocation(true);
+
+      try {
+        const resolved = await resolveCoordinateLocation(latitude, longitude);
+
+        if (locationRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const nextLocation: SelectedLocation = {
+          latitude,
+          longitude,
+          displayName: resolved.displayName,
+          source,
+        };
+
+        setLocation(nextLocation);
+        setNotice(resolved.fallbackUsed ? "정확한 행정구역명을 찾지 못해 좌표 기준 이름으로 표시합니다." : resolvedNotice);
+
+        if (autoFetch) {
+          await loadWeather(nextLocation, "today", bounds.today);
+        }
+      } catch (caughtError) {
+        if (locationRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const fallbackLocation: SelectedLocation = {
+          latitude,
+          longitude,
+          displayName: coordinateDisplayName(latitude, longitude),
+          source,
+        };
+
+        setLocation(fallbackLocation);
+        setNotice(caughtError instanceof Error ? caughtError.message : "지역명을 확인하지 못해 좌표 기준으로 표시합니다.");
+
+        if (autoFetch) {
+          await loadWeather(fallbackLocation, "today", bounds.today);
+        }
+      } finally {
+        if (locationRequestIdRef.current === requestId) {
+          setIsResolvingLocation(false);
+        }
+      }
+    },
+    [bounds.today, loadWeather, resolveCoordinateLocation],
+  );
+
   const locateUser = useCallback(
     (autoFetch = false) => {
       if (!navigator.geolocation) {
@@ -128,18 +228,15 @@ export function WeatherDashboard() {
       setIsLocating(true);
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          const nextLocation: SelectedLocation = {
+          setIsLocating(false);
+          void applyCoordinateSelection({
             latitude: position.coords.latitude,
             longitude: position.coords.longitude,
-            displayName: "Current location",
             source: "browser_location",
-          };
-          setLocation(nextLocation);
-          setNotice("현재 위치를 기본 지역으로 설정했습니다.");
-          setIsLocating(false);
-          if (autoFetch) {
-            void loadWeather(nextLocation, "today", bounds.today);
-          }
+            autoFetch,
+            pendingNotice: "현재 위치의 지역명을 확인하는 중입니다.",
+            resolvedNotice: "현재 위치를 기본 지역으로 설정했습니다.",
+          });
         },
         () => {
           setLocation(SEOUL);
@@ -152,7 +249,7 @@ export function WeatherDashboard() {
         { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 },
       );
     },
-    [bounds.today, loadWeather],
+    [applyCoordinateSelection, bounds.today, loadWeather],
   );
 
   useEffect(() => {
@@ -209,13 +306,13 @@ export function WeatherDashboard() {
   }
 
   function selectMapLocation(latitude: number, longitude: number) {
-    setLocation({
+    void applyCoordinateSelection({
       latitude,
       longitude,
-      displayName: `Map location (${latitude.toFixed(3)}, ${longitude.toFixed(3)})`,
       source: "map_click",
+      pendingNotice: "지도에서 선택한 위치의 지역명을 확인하는 중입니다.",
+      resolvedNotice: "지도에서 선택한 지역으로 변경했습니다.",
     });
-    setNotice("지도에서 선택한 좌표로 지역을 변경했습니다.");
   }
 
   function selectHistory(item: WeatherHistoryItem) {
@@ -344,7 +441,12 @@ export function WeatherDashboard() {
                 max={mode === "past" ? bounds.yesterday : mode === "future" ? bounds.maxFutureDate : bounds.today}
                 onChange={(event) => setDate(event.target.value)}
               />
-              <button className="primary-button" type="button" onClick={() => void submitWeather()} disabled={isLoadingWeather}>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void submitWeather()}
+                disabled={isLoadingWeather || isResolvingLocation}
+              >
                 {isLoadingWeather ? <Loader2 size={17} className="spin" /> : <CloudSun size={17} />}
                 날씨 조회
               </button>
@@ -474,4 +576,8 @@ function formatMillimeters(value: number | null | undefined) {
 
 function formatPercent(value: number | null | undefined) {
   return typeof value === "number" ? `${Math.round(value)}%` : "-";
+}
+
+function coordinateDisplayName(latitude: number, longitude: number) {
+  return `좌표 위치 (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
 }

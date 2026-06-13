@@ -6,6 +6,7 @@ Open-Meteo API를 사용해 지도와 검색 기반으로 지역을 선택하고
 
 - 브라우저 현재 위치 기반 기본 지역 설정
 - Leaflet 지도 클릭 및 Open-Meteo Geocoding API 검색
+- 지도 클릭 및 현재 위치 좌표의 실제 지역명 표시
 - 과거, 오늘, 미래 날씨 조회
 - Open-Meteo API 날짜 제약 검증
 - SQLite 기반 최근 조회 기록 10건 저장

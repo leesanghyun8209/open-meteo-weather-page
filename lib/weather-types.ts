@@ -63,3 +63,10 @@ export type LocationSearchResult = {
   longitude: number;
   displayName: string;
 };
+
+export type ReverseLocationResult = {
+  displayName: string;
+  latitude: number;
+  longitude: number;
+  fallbackUsed: boolean;
+};
